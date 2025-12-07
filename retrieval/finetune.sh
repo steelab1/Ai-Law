@@ -24,4 +24,3 @@ NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per
     --logging_steps 29000 \
     --save_steps 29000 \
     --save_total_limit 8
-```
