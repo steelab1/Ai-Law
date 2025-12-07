@@ -105,8 +105,8 @@ services:
       test: ["CMD", "curl", "-f", "http://localhost:8002/"]
       interval: 30s
       timeout: 10s
-      retries: 3
-      start_period: 60s
+      retries: 10
+      start_period: 300s
     networks:
       - ai-law-network
     restart: unless-stopped
@@ -137,8 +137,12 @@ services:
         condition: service_healthy
       mongodb:
         condition: service_healthy
-      backend-api:
+      qdrant:
+        condition: service_started
+      elasticsearch:
         condition: service_healthy
+      backend-api:
+        condition: service_started
     volumes:
       - model_cache:/root/.cache
     networks:
@@ -160,13 +164,13 @@ services:
       - BACKEND_URL=http://backend-api:8002
     depends_on:
       backend-api:
-        condition: service_healthy
+        condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8051/_stcore/health"]
       interval: 30s
       timeout: 10s
-      retries: 3
-      start_period: 30s
+      retries: 5
+      start_period: 60s
     networks:
       - ai-law-network
     restart: unless-stopped
