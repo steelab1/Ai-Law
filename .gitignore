@@ -3,3 +3,4 @@ CLAUDE.md
 .venvdata/corpus.csv
 data/train.csv
 data/
+.claude
