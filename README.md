@@ -199,3 +199,12 @@ Tập golden dùng để đánh giá gồm 1000 mẫu, mỗi mẫu gồm 3 trư�
 Điểm được đánh giá trên thang 5 và đạt độ chính xác 4.27/5
 # DEMO       
 ![demo](images/demo.png)
+
+Tóm tắt:
+% Data	Số documents	Thời gian ước tính
+10%	26,159	~45 phút
+50%	130,795	~3.6 giờ
+100%	261,590	~7-8 giờ
+Lệnh import 100% data:
+cd d:\Project\Ai-Law
+.venv311\Scripts\python.exe scripts\import_data.py --corpus data/corpus.csv --recreate --percent 100
