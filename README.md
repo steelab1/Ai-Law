@@ -45,11 +45,6 @@ Link bộ dữ liệu: [Link dữ liệu](https://drive.google.com/drive/folders
 │   │   ├── schemas.py                          # Các schema dữ liệu cho API
 │   │   ├── task.py                             # Định nghĩa task cho celery
 │   │   └── utils.py                            # Các hàm tiện ích cho backend                  
-├── chatbot-ui                                  # Ứng dụng frontend chatbot
-│   ├── chat_interface.py                       # Logic giao diện chatbot
-│   ├── config.toml                             # File cấu hình cho chatbot                  
-│   ├── entrypoint.sh                           # Script khởi chạy chatbot
-│   ├── requirements.txt                        # Các phụ thuộc Python cho chatbot
 ├── finetune_llm                                # Thư mục tinh chỉnh LLM
 │   ├── download_model.py                       # tải model gốc          
 │   ├── finetune.py                             # tinh chỉnh LLM cho sinh câu trả lời
@@ -76,12 +71,12 @@ Cài đặt toàn bộ phụ thuộc của dự án trên máy local
 python -m venv .venv
 source .venv/bin/activate
 pip install -r backend/requirements.txt
-pip install -r chatbot-ui/requirements.txt
 ```
+
 Khởi động ứng dụng:
+
 ```bash
 sh backend/entrypoint.sh
-sh chatbot-ui/entrypoint.sh
 ```
 
 # Các dịch vụ của ứng dụng 

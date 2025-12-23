@@ -15,7 +15,6 @@ help:
 	@echo "  make logs     - View logs from all services"
 	@echo "  make logs-api - View logs from backend API"
 	@echo "  make logs-celery - View logs from Celery worker"
-	@echo "  make logs-frontend - View logs from frontend"
 	@echo "  make clean    - Remove all containers, volumes, and images"
 	@echo "  make status   - Show status of all services"
 	@echo ""
@@ -60,9 +59,6 @@ logs-api:
 logs-celery:
 	docker compose logs -f backend-celery
 
-logs-frontend:
-	docker compose logs -f frontend
-
 logs-redis:
 	docker compose logs -f redis
 
@@ -96,14 +92,10 @@ shell-api:
 shell-celery:
 	docker compose exec backend-celery /bin/bash
 
-shell-frontend:
-	docker compose exec frontend /bin/bash
-
 # Health check
 health:
 	@echo "Checking services health..."
 	@curl -s http://localhost:8002/ > /dev/null && echo "✓ Backend API: OK" || echo "✗ Backend API: FAILED"
-	@curl -s http://localhost:8051/_stcore/health > /dev/null && echo "✓ Frontend: OK" || echo "✗ Frontend: FAILED"
 	@curl -s http://localhost:6333/ > /dev/null && echo "✓ Qdrant: OK" || echo "✗ Qdrant: FAILED"
 	@curl -s http://localhost:9200/ > /dev/null && echo "✓ Elasticsearch: OK" || echo "✗ Elasticsearch: FAILED"
 	@docker compose exec redis redis-cli ping > /dev/null && echo "✓ Redis: OK" || echo "✗ Redis: FAILED"
