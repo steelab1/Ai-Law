@@ -10,7 +10,7 @@ from utils import setup_logging
 from tasks import llm_handle_message
 
 from search_document.combine_search import CombinedSearch
-from search_document.rerank import BGEReranker
+# BGE-reranker đã bỏ để tiết kiệm ~5GB VRAM
 
 # Contract modules
 from contract_drafting.generator import ContractGenerator
@@ -33,9 +33,8 @@ from contract_analysis.schemas import (
 setup_logging()
 logger = logging.getLogger(__name__)
 
-# init retriever and reranker
+# init retriever (không dùng reranker để tiết kiệm VRAM)
 combined_search_instance = CombinedSearch()
-reranker_instance = BGEReranker(model_name="BAAI/bge-reranker-v2-m3", use_fp16=True)
 
 # init contract modules
 contract_generator = ContractGenerator()
@@ -76,6 +75,12 @@ async def root():
 
 @app.post("/retrieval")
 async def retrieval(request: RetrievalRequest):
+    """
+    Retrieval endpoint - tìm kiếm văn bản pháp luật.
+
+    Đã tối ưu: chỉ dùng paraphrase-vietnamese-law + Elasticsearch
+    Không dùng reranker để tiết kiệm ~5GB VRAM
+    """
     try:
         import time as timing
         start_total = timing.time()
@@ -85,23 +90,20 @@ async def retrieval(request: RetrievalRequest):
         top_k_search = request.top_k_search
         top_k_rerank = request.top_k_rerank
 
-        # Thực hiện tìm kiếm bằng CombinedSearch
+        # Thực hiện tìm kiếm bằng CombinedSearch (legal embedding + elasticsearch)
         start_search = timing.time()
         search_results = combined_search_instance.search(query_text=query, top_k=top_k_search)
         search_time = timing.time() - start_search
         logger.info(f"[TIMING] Combined search: {search_time:.2f}s, found {len(search_results)} docs")
 
-        # Thực hiện rerank kết quả tìm kiếm
-        start_rerank = timing.time()
-        reranked_results = reranker_instance.rerank(query=query, documents=search_results, topk=top_k_rerank)
-        rerank_time = timing.time() - start_rerank
-        logger.info(f"[TIMING] Rerank {len(search_results)} docs: {rerank_time:.2f}s")
+        # Trả về top_k_rerank kết quả (không rerank, để LLM tự chọn context)
+        results = search_results[:top_k_rerank] if len(search_results) > top_k_rerank else search_results
 
         total_time = timing.time() - start_total
         logger.info(f"[TIMING] Total retrieval: {total_time:.2f}s")
 
         return {
-            "results": reranked_results
+            "results": results
         }
 
     except Exception as e:
