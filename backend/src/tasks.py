@@ -29,22 +29,36 @@ def bot_answer_message(history, message):
     logger.info(f"User intent: {user_intent}")
 
     # Call api retrieval relevance document
+    # With GPU: can use higher top_k for better results
+    # Without GPU: reduce to 5 to limit CPU rerank time
     payload = {
         "query": user_intent,
-        "top_k_search": 30,
+        "top_k_search": 20,  # 20 per source, GPU rerank is fast
         "top_k_rerank": 5
     }
     headers = {
         "Content-Type": "application/json"
     }
 
-    response = requests.post(RETRIEVAL_URL, json=payload, headers=headers)
-
-    if response.status_code == 200:
-        top_docs = response.json().get("results")
-    else:
-        print("Error:", response.status_code, response.text)
+    logger.info(f"Calling retrieval API: {RETRIEVAL_URL}")
+    try:
+        response = requests.post(RETRIEVAL_URL, json=payload, headers=headers, timeout=120)
+    except requests.exceptions.Timeout:
+        logger.error("Retrieval API timeout after 120s")
         top_docs = []
+        response = None
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Retrieval API error: {e}")
+        top_docs = []
+        response = None
+
+    if response and response.status_code == 200:
+        top_docs = response.json().get("results")
+        logger.info(f"Retrieval returned {len(top_docs)} documents")
+    elif response:
+        logger.error(f"Retrieval API error: {response.status_code} - {response.text}")
+        top_docs = []
+    # else: top_docs already set in exception handlers
 
     # Use history as openai messages
     session_history = copy(history)

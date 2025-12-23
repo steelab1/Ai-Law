@@ -1,12 +1,24 @@
+import torch
+import logging
 from qdrant_client import QdrantClient, models
 from FlagEmbedding import BGEM3FlagModel
-import tqdm
+
+logger = logging.getLogger(__name__)
 
 class QdrantSearch_bge:
     def __init__(self, host: str, collection_name: str, model_name: str, use_fp16: bool = True):
         self.client = QdrantClient(host)
         self.collection_name = collection_name
-        self.model = BGEM3FlagModel(model_name, use_fp16=use_fp16)
+
+        # Auto-detect GPU
+        if torch.cuda.is_available():
+            device = "cuda"
+            logger.info(f"BGE-M3 using GPU: {torch.cuda.get_device_name(0)}")
+        else:
+            device = "cpu"
+            logger.info("BGE-M3 using CPU")
+
+        self.model = BGEM3FlagModel(model_name, use_fp16=use_fp16, device=device)
         
     def encode_query(self, query_text: str):
         """Encode the query text into dense and sparse vectors"""

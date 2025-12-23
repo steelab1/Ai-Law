@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 # init retriever and reranker
 combined_search_instance = CombinedSearch()
-reranker_instance = BGEReranker(model_name="BAAI/bge-reranker-v2-m3", use_fp16=False)
+reranker_instance = BGEReranker(model_name="BAAI/bge-reranker-v2-m3", use_fp16=True)
 
 # init contract modules
 contract_generator = ContractGenerator()
@@ -77,21 +77,35 @@ async def root():
 @app.post("/retrieval")
 async def retrieval(request: RetrievalRequest):
     try:
+        import time as timing
+        start_total = timing.time()
+
         # Lấy dữ liệu từ body
         query = request.query
         top_k_search = request.top_k_search
         top_k_rerank = request.top_k_rerank
+
         # Thực hiện tìm kiếm bằng CombinedSearch
+        start_search = timing.time()
         search_results = combined_search_instance.search(query_text=query, top_k=top_k_search)
+        search_time = timing.time() - start_search
+        logger.info(f"[TIMING] Combined search: {search_time:.2f}s, found {len(search_results)} docs")
 
         # Thực hiện rerank kết quả tìm kiếm
+        start_rerank = timing.time()
         reranked_results = reranker_instance.rerank(query=query, documents=search_results, topk=top_k_rerank)
+        rerank_time = timing.time() - start_rerank
+        logger.info(f"[TIMING] Rerank {len(search_results)} docs: {rerank_time:.2f}s")
+
+        total_time = timing.time() - start_total
+        logger.info(f"[TIMING] Total retrieval: {total_time:.2f}s")
 
         return {
             "results": reranked_results
         }
 
     except Exception as e:
+        logger.error(f"Retrieval error: {e}")
         raise HTTPException(status_code=500, detail=f"An error occurred: {e}")
 
 @app.post("/chat/complete")

@@ -1,12 +1,24 @@
 import torch
+import logging
 from FlagEmbedding import FlagReranker
+
+logger = logging.getLogger(__name__)
 
 class BGEReranker:
     def __init__(self, model_name: str, use_fp16: bool = True):
         """
         Khởi tạo BGEReranker với model đã tải.
+        Auto-detect GPU và sử dụng nếu có.
         """
-        self.model = FlagReranker(model_name, use_fp16=use_fp16)
+        # Auto-detect device
+        if torch.cuda.is_available():
+            device = "cuda"
+            logger.info(f"BGEReranker using GPU: {torch.cuda.get_device_name(0)}")
+        else:
+            device = "cpu"
+            logger.info("BGEReranker using CPU (no GPU available)")
+
+        self.model = FlagReranker(model_name, use_fp16=use_fp16, device=device)
 
     def calculate_scores(self, pairs: list[list[str]]) -> list[float]:
         """
