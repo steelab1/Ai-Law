@@ -96,7 +96,9 @@ services:
       - RETRIEVAL_URL=http://backend-api:8002/retrieval
       - BGE_COLLECTION=${BGE_COLLECTION:-law_with_bge_round1}
       - E5_COLLECTION=${E5_COLLECTION:-law_with_e5_emb_not_finetune}
+      - LEGAL_EMB_COLLECTION=${LEGAL_EMB_COLLECTION:-law_with_legal_emb}
       - ELASTIC_INDEX=${ELASTIC_INDEX:-legal_data_part2}
+      - USE_LEGAL_EMB=${USE_LEGAL_EMB:-false}
     depends_on:
       redis:
         condition: service_healthy
@@ -138,7 +140,9 @@ services:
       - RETRIEVAL_URL=http://backend-api:8002/retrieval
       - BGE_COLLECTION=${BGE_COLLECTION:-law_with_bge_round1}
       - E5_COLLECTION=${E5_COLLECTION:-law_with_e5_emb_not_finetune}
+      - LEGAL_EMB_COLLECTION=${LEGAL_EMB_COLLECTION:-law_with_legal_emb}
       - ELASTIC_INDEX=${ELASTIC_INDEX:-legal_data_part2}
+      - USE_LEGAL_EMB=${USE_LEGAL_EMB:-false}
     depends_on:
       redis:
         condition: service_healthy
