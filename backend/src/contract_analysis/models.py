@@ -11,11 +11,19 @@ from pymongo import MongoClient
 
 logger = logging.getLogger(__name__)
 
-# MongoDB connection
+# MongoDB connection with connection pooling
 MONGODB_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017/")
 MONGODB_DATABASE = os.getenv("MONGODB_DATABASE", "final_project")
+MONGODB_MAX_POOL_SIZE = int(os.getenv("MONGODB_MAX_POOL_SIZE", "50"))
+MONGODB_MIN_POOL_SIZE = int(os.getenv("MONGODB_MIN_POOL_SIZE", "10"))
 
-client = MongoClient(MONGODB_URL)
+client = MongoClient(
+    MONGODB_URL,
+    maxPoolSize=MONGODB_MAX_POOL_SIZE,
+    minPoolSize=MONGODB_MIN_POOL_SIZE,
+    maxIdleTimeMS=30000,
+    waitQueueTimeoutMS=10000
+)
 db = client[MONGODB_DATABASE]
 
 # Collection
@@ -40,20 +48,23 @@ def save_analysis(analysis: Dict[str, Any]) -> str:
     return analysis["analysis_id"]
 
 
-def get_analysis_by_id(analysis_id: str) -> Optional[Dict[str, Any]]:
+def get_analysis_by_id(analysis_id: str, user_id: str = None) -> Optional[Dict[str, Any]]:
     """
-    Get analysis by ID.
+    Get analysis by ID with optional user ownership validation.
 
     Args:
         analysis_id: Analysis identifier
+        user_id: Optional user ID for ownership validation.
+                 If provided, only returns analysis if user is owner.
 
     Returns:
-        Analysis document or None
+        Analysis document or None if not found/not authorized
     """
-    analysis = contract_analyses.find_one(
-        {"analysis_id": analysis_id},
-        {"_id": 0}
-    )
+    query = {"analysis_id": analysis_id}
+    if user_id:
+        query["user_id"] = user_id
+
+    analysis = contract_analyses.find_one(query, {"_id": 0})
     return analysis
 
 

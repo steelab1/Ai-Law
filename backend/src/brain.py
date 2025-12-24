@@ -2,21 +2,44 @@ import json
 import logging
 import os
 from openai import OpenAI
-from redis import InvalidResponse
 from dotenv import load_dotenv
 
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", default=None)
+OPENAI_TIMEOUT = float(os.getenv("OPENAI_TIMEOUT", "60.0"))  # 60 seconds default
+OPENAI_MAX_RETRIES = int(os.getenv("OPENAI_MAX_RETRIES", "2"))
+
 from tavily_search import search, functions_info
 
 logger = logging.getLogger(__name__)
 
+
 def get_openai_client():
-    return OpenAI(api_key=OPENAI_API_KEY)
+    """
+    Create OpenAI client with timeout and retry configuration.
+    """
+    return OpenAI(
+        api_key=OPENAI_API_KEY,
+        timeout=OPENAI_TIMEOUT,
+        max_retries=OPENAI_MAX_RETRIES
+    )
+
 
 client = get_openai_client()
 
+
 def openai_chat_complete(messages=(), model="gpt-4o-mini", raw=False):
+    """
+    Call OpenAI chat completion API.
+
+    Args:
+        messages: List of message dicts with role and content
+        model: Model to use (default: gpt-4o-mini)
+        raw: If True, return raw message object; if False, return content string
+
+    Returns:
+        Response content string or raw message object
+    """
     response = client.chat.completions.create(
         model=model,
         messages=messages

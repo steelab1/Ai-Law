@@ -43,8 +43,44 @@ contract_comparator = ContractComparator()
 
 app = FastAPI(
     title="Vietnamese Legal Q&A API",
-    description="API for legal Q&A, contract drafting, and contract analysis",
-    version="2.0.0"
+    description="""
+## Hệ thống Hỏi đáp Pháp luật Việt Nam
+
+API hỗ trợ 3 chức năng chính:
+
+### 1. Hỏi đáp pháp luật (Legal Q&A)
+- Tìm kiếm văn bản pháp luật liên quan
+- Trả lời câu hỏi về luật Việt Nam sử dụng RAG (Retrieval-Augmented Generation)
+
+### 2. Soạn thảo hợp đồng (Contract Drafting)
+- Lấy danh sách mẫu hợp đồng có sẵn
+- Tạo hợp đồng từ mẫu với các thông tin tùy chỉnh
+- Tham chiếu điều luật liên quan
+
+### 3. Phân tích hợp đồng (Contract Analysis)
+- Upload và phân tích hợp đồng từ file PDF/Word
+- Phát hiện điều khoản bất lợi
+- Kiểm tra tuân thủ pháp luật
+- Đánh giá rủi ro
+
+---
+**Liên hệ:** support@example.com
+    """,
+    version="2.0.0",
+    openapi_tags=[
+        {
+            "name": "Legal Q&A",
+            "description": "API hỏi đáp và tìm kiếm văn bản pháp luật Việt Nam"
+        },
+        {
+            "name": "Contract Drafting",
+            "description": "API soạn thảo hợp đồng từ mẫu có sẵn"
+        },
+        {
+            "name": "Contract Analysis",
+            "description": "API phân tích và đánh giá rủi ro hợp đồng"
+        }
+    ]
 )
 
 # CORS middleware - allow frontend to call API
@@ -58,28 +94,65 @@ app.add_middleware(
 
 # define class name
 class CompleteRequest(BaseModel):
+    """Schema cho request chat hoàn chỉnh"""
     bot_id: Optional[str] = 'bot_Legal_VN'
     user_id: str
     user_message: str
     sync_request: Optional[bool] = False
 
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "bot_id": "bot_Legal_VN",
+                "user_id": "user_123456",
+                "user_message": "Thời gian thử việc tối đa là bao lâu?",
+                "sync_request": False
+            }
+        }
+
 class RetrievalRequest(BaseModel):
+    """Schema cho request tìm kiếm văn bản pháp luật"""
     query: str
     top_k_search: int = 30
     top_k_rerank: int = 5
 
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "query": "Thời gian thử việc tối đa là bao lâu?",
+                "top_k_search": 30,
+                "top_k_rerank": 5
+            }
+        }
 
-@app.get("/")
+
+@app.get("/", tags=["Health Check"])
 async def root():
+    """
+    Kiểm tra trạng thái server.
+
+    Trả về message "Hello World" nếu server đang hoạt động.
+    """
     return {"message": "Hello World"}
 
-@app.post("/retrieval")
+@app.post("/retrieval", tags=["Legal Q&A"])
 async def retrieval(request: RetrievalRequest):
     """
-    Retrieval endpoint - tìm kiếm văn bản pháp luật.
+    Tìm kiếm văn bản pháp luật liên quan đến câu hỏi.
 
-    Đã tối ưu: chỉ dùng paraphrase-vietnamese-law + Elasticsearch
-    Không dùng reranker để tiết kiệm ~5GB VRAM
+    **Mô tả:**
+    - Sử dụng kết hợp semantic search (paraphrase-vietnamese-law) và lexical search (Elasticsearch BM25)
+    - Trả về danh sách các điều luật liên quan nhất
+
+    **Tham số:**
+    - **query**: Câu hỏi hoặc từ khóa tìm kiếm
+    - **top_k_search**: Số lượng kết quả tìm kiếm ban đầu (mặc định: 30)
+    - **top_k_rerank**: Số lượng kết quả trả về sau khi lọc (mặc định: 5)
+
+    **Ví dụ câu hỏi:**
+    - "Thời gian thử việc tối đa là bao lâu?"
+    - "Mức phạt khi không đội mũ bảo hiểm?"
+    - "Quy định về hợp đồng lao động"
     """
     try:
         import time as timing
@@ -110,8 +183,24 @@ async def retrieval(request: RetrievalRequest):
         logger.error(f"Retrieval error: {e}")
         raise HTTPException(status_code=500, detail=f"An error occurred: {e}")
 
-@app.post("/chat/complete")
+@app.post("/chat/complete", tags=["Legal Q&A"])
 async def complete(data: CompleteRequest):
+    """
+    Gửi câu hỏi và nhận câu trả lời từ AI về pháp luật Việt Nam.
+
+    **Mô tả:**
+    - Hệ thống sẽ phân loại câu hỏi (pháp luật / chitchat)
+    - Nếu là câu hỏi pháp luật: tìm kiếm văn bản liên quan và sinh câu trả lời
+    - Nếu không tìm thấy trong database: sử dụng Tavily web search
+
+    **Chế độ xử lý:**
+    - **sync_request = false** (mặc định): Trả về task_id, dùng API `/chat/complete_v2/{task_id}` để lấy kết quả
+    - **sync_request = true**: Đợi và trả về kết quả ngay (có thể mất 10-30 giây)
+
+    **Lưu ý:**
+    - user_id được dùng để lưu lịch sử hội thoại
+    - Mỗi user_id có context riêng biệt
+    """
     bot_id = data.bot_id
     user_id = data.user_id
     user_message = data.user_message
@@ -128,8 +217,25 @@ async def complete(data: CompleteRequest):
         return {"task_id": task.id}
 
 
-@app.get("/chat/complete_v2/{task_id}")
+@app.get("/chat/complete_v2/{task_id}", tags=["Legal Q&A"])
 async def get_response(task_id: str):
+    """
+    Lấy kết quả trả lời từ task_id.
+
+    **Mô tả:**
+    - Endpoint này dùng để lấy kết quả sau khi gọi `/chat/complete` với sync_request=false
+    - Hệ thống sẽ polling và đợi tối đa 60 giây
+
+    **Trạng thái task (task_status):**
+    - **PENDING**: Task đang chờ xử lý
+    - **STARTED**: Task đang được xử lý
+    - **SUCCESS**: Task hoàn thành, kết quả trong `task_result`
+    - **FAILURE**: Task thất bại
+
+    **Cách sử dụng:**
+    1. Gọi POST `/chat/complete` → nhận `task_id`
+    2. Gọi GET `/chat/complete_v2/{task_id}` → nhận kết quả
+    """
     start_time = time.time()
     timeout = 60  # Timeout sau 60 giây
     polling_interval = 0.1  # Thời gian chờ giữa mỗi lần kiểm tra (100ms)
@@ -174,10 +280,25 @@ async def list_templates(
     industry: Optional[str] = None
 ):
     """
-    Lay danh sach cac mau hop dong co san.
+    Lấy danh sách các mẫu hợp đồng có sẵn.
 
-    - **template_type**: Loc theo loai hop dong (labor, sales, rental, services, loan, partnership)
-    - **industry**: Loc theo nganh (general, real_estate, tech, etc.)
+    **Mô tả:**
+    - Trả về danh sách tất cả mẫu hợp đồng trong hệ thống
+    - Có thể lọc theo loại hợp đồng hoặc ngành nghề
+
+    **Loại hợp đồng (template_type):**
+    - `labor`: Hợp đồng lao động
+    - `sales`: Hợp đồng mua bán
+    - `rental`: Hợp đồng thuê/cho thuê
+    - `services`: Hợp đồng dịch vụ
+    - `loan`: Hợp đồng vay/cho vay
+    - `partnership`: Hợp đồng hợp tác
+
+    **Ngành nghề (industry):**
+    - `general`: Chung
+    - `real_estate`: Bất động sản
+    - `tech`: Công nghệ
+    - `retail`: Bán lẻ
     """
     try:
         templates = get_all_templates(template_type, industry)
@@ -201,9 +322,16 @@ async def list_templates(
 @app.get("/contract/templates/{template_id}", response_model=TemplateDetailResponse, tags=["Contract Drafting"])
 async def get_template_detail(template_id: str):
     """
-    Lay chi tiet mau hop dong bao gom cac truong can dien.
+    Lấy chi tiết mẫu hợp đồng bao gồm các trường cần điền.
 
-    - **template_id**: ID cua mau hop dong
+    **Mô tả:**
+    - Trả về thông tin chi tiết của một mẫu hợp đồng
+    - Bao gồm các section, điều khoản, và danh sách placeholder cần điền
+
+    **Response bao gồm:**
+    - `sections`: Các phần của hợp đồng
+    - `legal_references`: Các điều luật tham chiếu
+    - `all_placeholders`: Danh sách các trường cần điền giá trị
     """
     template = get_template_by_id(template_id)
     if not template:
@@ -227,13 +355,26 @@ async def get_template_detail(template_id: str):
 @app.post("/contract/draft", response_model=ContractDraftResponse, tags=["Contract Drafting"])
 async def create_contract_draft(request: ContractDraftRequest):
     """
-    Tao hop dong tu mau co san.
+    Tạo hợp đồng từ mẫu có sẵn.
 
-    - **user_id**: ID nguoi dung
-    - **template_id**: ID mau hop dong
-    - **values**: Gia tri cac truong (vd: {"party_a_name": "Cong ty ABC"})
-    - **additional_clauses**: Yeu cau bo sung (optional)
-    - **include_legal_references**: Co lay luat lien quan khong (default: true)
+    **Mô tả:**
+    - Điền thông tin vào mẫu hợp đồng để tạo hợp đồng hoàn chỉnh
+    - Có thể yêu cầu thêm điều khoản bổ sung
+    - Tự động tham chiếu các điều luật liên quan
+
+    **Tham số:**
+    - **user_id**: ID người dùng (để lưu lịch sử)
+    - **template_id**: ID mẫu hợp đồng (lấy từ API `/contract/templates`)
+    - **values**: Object chứa giá trị các trường, ví dụ:
+      ```json
+      {
+        "party_a_name": "Công ty TNHH ABC",
+        "party_a_address": "123 Nguyễn Huệ, Q1, TP.HCM",
+        "salary": "15,000,000 VND"
+      }
+      ```
+    - **additional_clauses**: Yêu cầu bổ sung điều khoản (tùy chọn)
+    - **include_legal_references**: Có lấy luật liên quan không (mặc định: true)
     """
     try:
         response = await contract_generator.generate_contract(request)
@@ -252,11 +393,20 @@ async def get_user_drafts(
     skip: int = 0
 ):
     """
-    Lay lich su cac hop dong da soan cua nguoi dung.
+    Lấy lịch sử các hợp đồng đã soạn của người dùng.
 
-    - **user_id**: ID nguoi dung
-    - **limit**: So luong ket qua toi da
-    - **skip**: Bo qua bao nhieu ket qua (phan trang)
+    **Mô tả:**
+    - Trả về danh sách các hợp đồng đã được tạo bởi user
+    - Hỗ trợ phân trang với `limit` và `skip`
+
+    **Tham số:**
+    - **user_id**: ID người dùng
+    - **limit**: Số lượng kết quả tối đa (mặc định: 20)
+    - **skip**: Bỏ qua bao nhiêu kết quả đầu tiên (mặc định: 0)
+
+    **Ví dụ phân trang:**
+    - Trang 1: `limit=20&skip=0`
+    - Trang 2: `limit=20&skip=20`
     """
     try:
         return contract_generator.get_user_draft_history(user_id, limit, skip)
@@ -271,26 +421,35 @@ async def get_user_drafts(
 
 @app.post("/contract/analyze", response_model=ContractAnalysisResponse, tags=["Contract Analysis"])
 async def analyze_contract(
-    file: UploadFile = File(...),
-    user_id: str = Form(...),
-    contract_type: Optional[str] = Form(None),
-    unfavorable_clauses: bool = Form(True),
-    standard_comparison: bool = Form(True),
-    compliance_check: bool = Form(True),
-    obligations_summary: bool = Form(True),
-    risk_assessment: bool = Form(True)
+    file: UploadFile = File(..., description="File hợp đồng (PDF, DOCX, DOC)"),
+    user_id: str = Form(..., description="ID người dùng"),
+    contract_type: Optional[str] = Form(None, description="Loại hợp đồng (tự động nhận diện nếu không cung cấp)"),
+    unfavorable_clauses: bool = Form(True, description="Phân tích điều khoản bất lợi"),
+    standard_comparison: bool = Form(True, description="So sánh với mẫu chuẩn"),
+    compliance_check: bool = Form(True, description="Kiểm tra tuân thủ pháp luật"),
+    obligations_summary: bool = Form(True, description="Tóm tắt quyền và nghĩa vụ"),
+    risk_assessment: bool = Form(True, description="Đánh giá rủi ro")
 ):
     """
-    Phan tich hop dong tu file PDF hoac Word.
+    Phân tích hợp đồng từ file PDF hoặc Word.
 
-    - **file**: File hop dong (PDF, DOCX, DOC)
-    - **user_id**: ID nguoi dung
-    - **contract_type**: Loai hop dong (tu dong nhan dien neu khong cung cap)
-    - **unfavorable_clauses**: Phan tich dieu khoan bat loi
-    - **standard_comparison**: So sanh voi mau chuan
-    - **compliance_check**: Kiem tra tuan thu phap luat
-    - **obligations_summary**: Tom tat quyen va nghia vu
-    - **risk_assessment**: Danh gia rui ro
+    **Mô tả:**
+    - Upload file hợp đồng để AI phân tích
+    - Hỗ trợ định dạng: PDF, DOCX, DOC
+    - Tự động nhận diện loại hợp đồng nếu không chỉ định
+
+    **Các tùy chọn phân tích:**
+    - **unfavorable_clauses**: Phát hiện các điều khoản bất lợi cho bạn
+    - **standard_comparison**: So sánh với mẫu hợp đồng chuẩn
+    - **compliance_check**: Kiểm tra có vi phạm pháp luật không
+    - **obligations_summary**: Tóm tắt quyền và nghĩa vụ các bên
+    - **risk_assessment**: Đánh giá mức độ rủi ro (thang điểm 1-10)
+
+    **Kết quả trả về:**
+    - Điểm rủi ro và mức độ (low/medium/high)
+    - Danh sách điều khoản bất lợi kèm gợi ý sửa đổi
+    - Các vấn đề về tuân thủ pháp luật
+    - Khuyến nghị cải thiện hợp đồng
     """
     try:
         # Read file content
@@ -328,9 +487,14 @@ async def analyze_contract(
 @app.get("/contract/analysis/{analysis_id}", response_model=ContractAnalysisResponse, tags=["Contract Analysis"])
 async def get_analysis(analysis_id: str):
     """
-    Lay ket qua phan tich da luu.
+    Lấy kết quả phân tích đã lưu.
 
-    - **analysis_id**: ID ket qua phan tich
+    **Mô tả:**
+    - Truy xuất kết quả phân tích hợp đồng từ database
+    - Sử dụng `analysis_id` nhận được từ API `/contract/analyze`
+
+    **Lưu ý:**
+    - Trả về 404 nếu không tìm thấy kết quả
     """
     result = contract_comparator.get_analysis(analysis_id)
     if not result:
@@ -345,11 +509,20 @@ async def get_user_analyses(
     skip: int = 0
 ):
     """
-    Lay lich su phan tich hop dong cua nguoi dung.
+    Lấy lịch sử phân tích hợp đồng của người dùng.
 
-    - **user_id**: ID nguoi dung
-    - **limit**: So luong ket qua toi da
-    - **skip**: Bo qua bao nhieu ket qua (phan trang)
+    **Mô tả:**
+    - Trả về danh sách các hợp đồng đã được phân tích bởi user
+    - Hỗ trợ phân trang với `limit` và `skip`
+
+    **Tham số:**
+    - **user_id**: ID người dùng
+    - **limit**: Số lượng kết quả tối đa (mặc định: 20)
+    - **skip**: Bỏ qua bao nhiêu kết quả đầu tiên (mặc định: 0)
+
+    **Response bao gồm:**
+    - `analyses`: Danh sách các kết quả phân tích
+    - `total`: Tổng số kết quả
     """
     try:
         return contract_comparator.get_user_history(user_id, limit, skip)
