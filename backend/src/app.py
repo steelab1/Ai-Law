@@ -1,16 +1,22 @@
 import logging
 import time
-from typing import Dict, Optional
+from typing import Optional
 from celery.result import AsyncResult
 from fastapi import FastAPI, HTTPException, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import asyncio
+
 from utils import setup_logging
 from tasks import llm_handle_message
-
-from search_document.combine_search import CombinedSearch
-# BGE-reranker đã bỏ để tiết kiệm ~5GB VRAM
+from search_document.combine_search import CombinedSearch, SearchError
+from api_docs import (
+    APP_TITLE, APP_VERSION, APP_DESCRIPTION, APP_TAGS,
+    RETRIEVAL_DOC, CHAT_COMPLETE_DOC, CHAT_COMPLETE_V2_DOC,
+    LIST_TEMPLATES_DOC, TEMPLATE_DETAIL_DOC, CREATE_DRAFT_DOC, USER_DRAFTS_DOC,
+    ANALYZE_CONTRACT_DOC, GET_ANALYSIS_DOC, USER_ANALYSES_DOC,
+    COMPLETE_REQUEST_EXAMPLE, RETRIEVAL_REQUEST_EXAMPLE
+)
 
 # Contract modules
 from contract_drafting.generator import ContractGenerator
@@ -33,174 +39,101 @@ from contract_analysis.schemas import (
 setup_logging()
 logger = logging.getLogger(__name__)
 
-# init retriever (không dùng reranker để tiết kiệm VRAM)
+# Init services
 combined_search_instance = CombinedSearch()
-
-# init contract modules
 contract_generator = ContractGenerator()
 contract_comparator = ContractComparator()
 
-
+# FastAPI app
 app = FastAPI(
-    title="Vietnamese Legal Q&A API",
-    description="""
-## Hệ thống Hỏi đáp Pháp luật Việt Nam
-
-API hỗ trợ 3 chức năng chính:
-
-### 1. Hỏi đáp pháp luật (Legal Q&A)
-- Tìm kiếm văn bản pháp luật liên quan
-- Trả lời câu hỏi về luật Việt Nam sử dụng RAG (Retrieval-Augmented Generation)
-
-### 2. Soạn thảo hợp đồng (Contract Drafting)
-- Lấy danh sách mẫu hợp đồng có sẵn
-- Tạo hợp đồng từ mẫu với các thông tin tùy chỉnh
-- Tham chiếu điều luật liên quan
-
-### 3. Phân tích hợp đồng (Contract Analysis)
-- Upload và phân tích hợp đồng từ file PDF/Word
-- Phát hiện điều khoản bất lợi
-- Kiểm tra tuân thủ pháp luật
-- Đánh giá rủi ro
-
----
-**Liên hệ:** support@example.com
-    """,
-    version="2.0.0",
-    openapi_tags=[
-        {
-            "name": "Legal Q&A",
-            "description": "API hỏi đáp và tìm kiếm văn bản pháp luật Việt Nam"
-        },
-        {
-            "name": "Contract Drafting",
-            "description": "API soạn thảo hợp đồng từ mẫu có sẵn"
-        },
-        {
-            "name": "Contract Analysis",
-            "description": "API phân tích và đánh giá rủi ro hợp đồng"
-        }
-    ]
+    title=APP_TITLE,
+    description=APP_DESCRIPTION,
+    version=APP_VERSION,
+    openapi_tags=APP_TAGS
 )
 
-# CORS middleware - allow frontend to call API
+# CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for development
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# define class name
+
+# =============================================================================
+# REQUEST SCHEMAS
+# =============================================================================
+
 class CompleteRequest(BaseModel):
-    """Schema cho request chat hoàn chỉnh"""
     bot_id: Optional[str] = 'bot_Legal_VN'
     user_id: str
     user_message: str
     sync_request: Optional[bool] = False
 
     class Config:
-        json_schema_extra = {
-            "example": {
-                "bot_id": "bot_Legal_VN",
-                "user_id": "user_123456",
-                "user_message": "Thời gian thử việc tối đa là bao lâu?",
-                "sync_request": False
-            }
-        }
+        json_schema_extra = {"example": COMPLETE_REQUEST_EXAMPLE}
+
 
 class RetrievalRequest(BaseModel):
-    """Schema cho request tìm kiếm văn bản pháp luật"""
     query: str
     top_k_search: int = 30
     top_k_rerank: int = 5
 
     class Config:
-        json_schema_extra = {
-            "example": {
-                "query": "Thời gian thử việc tối đa là bao lâu?",
-                "top_k_search": 30,
-                "top_k_rerank": 5
-            }
-        }
+        json_schema_extra = {"example": RETRIEVAL_REQUEST_EXAMPLE}
 
+
+# =============================================================================
+# HEALTH CHECK
+# =============================================================================
 
 @app.get("/", tags=["Health Check"])
 async def root():
-    """
-    Kiểm tra trạng thái server.
-
-    Trả về message "Hello World" nếu server đang hoạt động.
-    """
+    """Kiểm tra trạng thái server."""
     return {"message": "Hello World"}
+
+
+# =============================================================================
+# LEGAL Q&A ENDPOINTS
+# =============================================================================
 
 @app.post("/retrieval", tags=["Legal Q&A"])
 async def retrieval(request: RetrievalRequest):
-    """
-    Tìm kiếm văn bản pháp luật liên quan đến câu hỏi.
-
-    **Mô tả:**
-    - Sử dụng kết hợp semantic search (paraphrase-vietnamese-law) và lexical search (Elasticsearch BM25)
-    - Trả về danh sách các điều luật liên quan nhất
-
-    **Tham số:**
-    - **query**: Câu hỏi hoặc từ khóa tìm kiếm
-    - **top_k_search**: Số lượng kết quả tìm kiếm ban đầu (mặc định: 30)
-    - **top_k_rerank**: Số lượng kết quả trả về sau khi lọc (mặc định: 5)
-
-    **Ví dụ câu hỏi:**
-    - "Thời gian thử việc tối đa là bao lâu?"
-    - "Mức phạt khi không đội mũ bảo hiểm?"
-    - "Quy định về hợp đồng lao động"
-    """
+    __doc__ = RETRIEVAL_DOC
     try:
-        import time as timing
-        start_total = timing.time()
+        start_total = time.time()
 
-        # Lấy dữ liệu từ body
         query = request.query
         top_k_search = request.top_k_search
         top_k_rerank = request.top_k_rerank
 
-        # Thực hiện tìm kiếm bằng CombinedSearch (legal embedding + elasticsearch)
-        start_search = timing.time()
+        start_search = time.time()
         search_results = combined_search_instance.search(query_text=query, top_k=top_k_search)
-        search_time = timing.time() - start_search
+        search_time = time.time() - start_search
         logger.info(f"[TIMING] Combined search: {search_time:.2f}s, found {len(search_results)} docs")
 
-        # Trả về top_k_rerank kết quả (không rerank, để LLM tự chọn context)
         results = search_results[:top_k_rerank] if len(search_results) > top_k_rerank else search_results
 
-        total_time = timing.time() - start_total
+        total_time = time.time() - start_total
         logger.info(f"[TIMING] Total retrieval: {total_time:.2f}s")
 
-        return {
-            "results": results
-        }
+        return {"results": results}
 
+    except SearchError as e:
+        logger.error(f"Search error: {e}")
+        raise HTTPException(status_code=503, detail="Search services unavailable")
     except Exception as e:
         logger.error(f"Retrieval error: {e}")
         raise HTTPException(status_code=500, detail=f"An error occurred: {e}")
 
+retrieval.__doc__ = RETRIEVAL_DOC
+
+
 @app.post("/chat/complete", tags=["Legal Q&A"])
 async def complete(data: CompleteRequest):
-    """
-    Gửi câu hỏi và nhận câu trả lời từ AI về pháp luật Việt Nam.
-
-    **Mô tả:**
-    - Hệ thống sẽ phân loại câu hỏi (pháp luật / chitchat)
-    - Nếu là câu hỏi pháp luật: tìm kiếm văn bản liên quan và sinh câu trả lời
-    - Nếu không tìm thấy trong database: sử dụng Tavily web search
-
-    **Chế độ xử lý:**
-    - **sync_request = false** (mặc định): Trả về task_id, dùng API `/chat/complete_v2/{task_id}` để lấy kết quả
-    - **sync_request = true**: Đợi và trả về kết quả ngay (có thể mất 10-30 giây)
-
-    **Lưu ý:**
-    - user_id được dùng để lưu lịch sử hội thoại
-    - Mỗi user_id có context riêng biệt
-    """
+    __doc__ = CHAT_COMPLETE_DOC
     bot_id = data.bot_id
     user_id = data.user_id
     user_message = data.user_message
@@ -216,47 +149,28 @@ async def complete(data: CompleteRequest):
         task = llm_handle_message.delay(bot_id, user_id, user_message)
         return {"task_id": task.id}
 
+complete.__doc__ = CHAT_COMPLETE_DOC
+
 
 @app.get("/chat/complete_v2/{task_id}", tags=["Legal Q&A"])
 async def get_response(task_id: str):
-    """
-    Lấy kết quả trả lời từ task_id.
-
-    **Mô tả:**
-    - Endpoint này dùng để lấy kết quả sau khi gọi `/chat/complete` với sync_request=false
-    - Hệ thống sẽ polling và đợi tối đa 60 giây
-
-    **Trạng thái task (task_status):**
-    - **PENDING**: Task đang chờ xử lý
-    - **STARTED**: Task đang được xử lý
-    - **SUCCESS**: Task hoàn thành, kết quả trong `task_result`
-    - **FAILURE**: Task thất bại
-
-    **Cách sử dụng:**
-    1. Gọi POST `/chat/complete` → nhận `task_id`
-    2. Gọi GET `/chat/complete_v2/{task_id}` → nhận kết quả
-    """
+    __doc__ = CHAT_COMPLETE_V2_DOC
     start_time = time.time()
-    timeout = 60  # Timeout sau 60 giây
-    polling_interval = 0.1  # Thời gian chờ giữa mỗi lần kiểm tra (100ms)
-    
+    timeout = 60
+    polling_interval = 0.1
+
     while True:
-        # Lấy trạng thái task từ Celery
         task_result = AsyncResult(task_id)
         task_status = task_result.status
-        
-        # Ghi log trạng thái task
         logger.info(f"Task ID: {task_id}, Status: {task_status}")
-        
-        # Nếu task đã hoàn tất, trả về kết quả
+
         if task_status not in ('PENDING', 'STARTED'):
             return {
                 "task_id": task_id,
                 "task_status": task_status,
                 "task_result": task_result.result
             }
-        
-        # Kiểm tra timeout
+
         elapsed_time = time.time() - start_time
         if elapsed_time > timeout:
             logger.warning(f"Task {task_id} timed out after {timeout} seconds.")
@@ -265,9 +179,10 @@ async def get_response(task_id: str):
                 "task_status": task_status,
                 "error_message": "Service timeout, please retry."
             }
-        
-        # Chờ trước khi kiểm tra lại
+
         await asyncio.sleep(polling_interval)
+
+get_response.__doc__ = CHAT_COMPLETE_V2_DOC
 
 
 # =============================================================================
@@ -279,27 +194,7 @@ async def list_templates(
     template_type: Optional[str] = None,
     industry: Optional[str] = None
 ):
-    """
-    Lấy danh sách các mẫu hợp đồng có sẵn.
-
-    **Mô tả:**
-    - Trả về danh sách tất cả mẫu hợp đồng trong hệ thống
-    - Có thể lọc theo loại hợp đồng hoặc ngành nghề
-
-    **Loại hợp đồng (template_type):**
-    - `labor`: Hợp đồng lao động
-    - `sales`: Hợp đồng mua bán
-    - `rental`: Hợp đồng thuê/cho thuê
-    - `services`: Hợp đồng dịch vụ
-    - `loan`: Hợp đồng vay/cho vay
-    - `partnership`: Hợp đồng hợp tác
-
-    **Ngành nghề (industry):**
-    - `general`: Chung
-    - `real_estate`: Bất động sản
-    - `tech`: Công nghệ
-    - `retail`: Bán lẻ
-    """
+    __doc__ = LIST_TEMPLATES_DOC
     try:
         templates = get_all_templates(template_type, industry)
         items = [
@@ -318,26 +213,16 @@ async def list_templates(
         logger.error(f"Error listing templates: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+list_templates.__doc__ = LIST_TEMPLATES_DOC
+
 
 @app.get("/contract/templates/{template_id}", response_model=TemplateDetailResponse, tags=["Contract Drafting"])
 async def get_template_detail(template_id: str):
-    """
-    Lấy chi tiết mẫu hợp đồng bao gồm các trường cần điền.
-
-    **Mô tả:**
-    - Trả về thông tin chi tiết của một mẫu hợp đồng
-    - Bao gồm các section, điều khoản, và danh sách placeholder cần điền
-
-    **Response bao gồm:**
-    - `sections`: Các phần của hợp đồng
-    - `legal_references`: Các điều luật tham chiếu
-    - `all_placeholders`: Danh sách các trường cần điền giá trị
-    """
+    __doc__ = TEMPLATE_DETAIL_DOC
     template = get_template_by_id(template_id)
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
 
-    # Extract all placeholders
     all_placeholders = ContractGenerator.get_all_placeholders(template)
 
     return TemplateDetailResponse(
@@ -351,31 +236,12 @@ async def get_template_detail(template_id: str):
         all_placeholders=all_placeholders
     )
 
+get_template_detail.__doc__ = TEMPLATE_DETAIL_DOC
+
 
 @app.post("/contract/draft", response_model=ContractDraftResponse, tags=["Contract Drafting"])
 async def create_contract_draft(request: ContractDraftRequest):
-    """
-    Tạo hợp đồng từ mẫu có sẵn.
-
-    **Mô tả:**
-    - Điền thông tin vào mẫu hợp đồng để tạo hợp đồng hoàn chỉnh
-    - Có thể yêu cầu thêm điều khoản bổ sung
-    - Tự động tham chiếu các điều luật liên quan
-
-    **Tham số:**
-    - **user_id**: ID người dùng (để lưu lịch sử)
-    - **template_id**: ID mẫu hợp đồng (lấy từ API `/contract/templates`)
-    - **values**: Object chứa giá trị các trường, ví dụ:
-      ```json
-      {
-        "party_a_name": "Công ty TNHH ABC",
-        "party_a_address": "123 Nguyễn Huệ, Q1, TP.HCM",
-        "salary": "15,000,000 VND"
-      }
-      ```
-    - **additional_clauses**: Yêu cầu bổ sung điều khoản (tùy chọn)
-    - **include_legal_references**: Có lấy luật liên quan không (mặc định: true)
-    """
+    __doc__ = CREATE_DRAFT_DOC
     try:
         response = await contract_generator.generate_contract(request)
         return response
@@ -385,6 +251,8 @@ async def create_contract_draft(request: ContractDraftRequest):
         logger.error(f"Error generating contract: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+create_contract_draft.__doc__ = CREATE_DRAFT_DOC
+
 
 @app.get("/contract/drafts/{user_id}", response_model=DraftHistoryResponse, tags=["Contract Drafting"])
 async def get_user_drafts(
@@ -392,27 +260,14 @@ async def get_user_drafts(
     limit: int = 20,
     skip: int = 0
 ):
-    """
-    Lấy lịch sử các hợp đồng đã soạn của người dùng.
-
-    **Mô tả:**
-    - Trả về danh sách các hợp đồng đã được tạo bởi user
-    - Hỗ trợ phân trang với `limit` và `skip`
-
-    **Tham số:**
-    - **user_id**: ID người dùng
-    - **limit**: Số lượng kết quả tối đa (mặc định: 20)
-    - **skip**: Bỏ qua bao nhiêu kết quả đầu tiên (mặc định: 0)
-
-    **Ví dụ phân trang:**
-    - Trang 1: `limit=20&skip=0`
-    - Trang 2: `limit=20&skip=20`
-    """
+    __doc__ = USER_DRAFTS_DOC
     try:
         return contract_generator.get_user_draft_history(user_id, limit, skip)
     except Exception as e:
         logger.error(f"Error getting user drafts: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+get_user_drafts.__doc__ = USER_DRAFTS_DOC
 
 
 # =============================================================================
@@ -423,39 +278,17 @@ async def get_user_drafts(
 async def analyze_contract(
     file: UploadFile = File(..., description="File hợp đồng (PDF, DOCX, DOC)"),
     user_id: str = Form(..., description="ID người dùng"),
-    contract_type: Optional[str] = Form(None, description="Loại hợp đồng (tự động nhận diện nếu không cung cấp)"),
+    contract_type: Optional[str] = Form(None, description="Loại hợp đồng"),
     unfavorable_clauses: bool = Form(True, description="Phân tích điều khoản bất lợi"),
     standard_comparison: bool = Form(True, description="So sánh với mẫu chuẩn"),
     compliance_check: bool = Form(True, description="Kiểm tra tuân thủ pháp luật"),
     obligations_summary: bool = Form(True, description="Tóm tắt quyền và nghĩa vụ"),
     risk_assessment: bool = Form(True, description="Đánh giá rủi ro")
 ):
-    """
-    Phân tích hợp đồng từ file PDF hoặc Word.
-
-    **Mô tả:**
-    - Upload file hợp đồng để AI phân tích
-    - Hỗ trợ định dạng: PDF, DOCX, DOC
-    - Tự động nhận diện loại hợp đồng nếu không chỉ định
-
-    **Các tùy chọn phân tích:**
-    - **unfavorable_clauses**: Phát hiện các điều khoản bất lợi cho bạn
-    - **standard_comparison**: So sánh với mẫu hợp đồng chuẩn
-    - **compliance_check**: Kiểm tra có vi phạm pháp luật không
-    - **obligations_summary**: Tóm tắt quyền và nghĩa vụ các bên
-    - **risk_assessment**: Đánh giá mức độ rủi ro (thang điểm 1-10)
-
-    **Kết quả trả về:**
-    - Điểm rủi ro và mức độ (low/medium/high)
-    - Danh sách điều khoản bất lợi kèm gợi ý sửa đổi
-    - Các vấn đề về tuân thủ pháp luật
-    - Khuyến nghị cải thiện hợp đồng
-    """
+    __doc__ = ANALYZE_CONTRACT_DOC
     try:
-        # Read file content
         file_bytes = await file.read()
 
-        # Build request
         from contract_analysis.schemas import ContractType as AnalysisContractType
 
         request = ContractAnalysisRequest(
@@ -483,23 +316,18 @@ async def analyze_contract(
         logger.error(f"Error analyzing contract: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+analyze_contract.__doc__ = ANALYZE_CONTRACT_DOC
+
 
 @app.get("/contract/analysis/{analysis_id}", response_model=ContractAnalysisResponse, tags=["Contract Analysis"])
-async def get_analysis(analysis_id: str):
-    """
-    Lấy kết quả phân tích đã lưu.
-
-    **Mô tả:**
-    - Truy xuất kết quả phân tích hợp đồng từ database
-    - Sử dụng `analysis_id` nhận được từ API `/contract/analyze`
-
-    **Lưu ý:**
-    - Trả về 404 nếu không tìm thấy kết quả
-    """
-    result = contract_comparator.get_analysis(analysis_id)
+async def get_analysis(analysis_id: str, user_id: Optional[str] = None):
+    __doc__ = GET_ANALYSIS_DOC
+    result = contract_comparator.get_analysis(analysis_id, user_id)
     if not result:
         raise HTTPException(status_code=404, detail="Analysis not found")
     return result
+
+get_analysis.__doc__ = GET_ANALYSIS_DOC
 
 
 @app.get("/contract/analyses/{user_id}", response_model=AnalysisHistoryResponse, tags=["Contract Analysis"])
@@ -508,28 +336,19 @@ async def get_user_analyses(
     limit: int = 20,
     skip: int = 0
 ):
-    """
-    Lấy lịch sử phân tích hợp đồng của người dùng.
-
-    **Mô tả:**
-    - Trả về danh sách các hợp đồng đã được phân tích bởi user
-    - Hỗ trợ phân trang với `limit` và `skip`
-
-    **Tham số:**
-    - **user_id**: ID người dùng
-    - **limit**: Số lượng kết quả tối đa (mặc định: 20)
-    - **skip**: Bỏ qua bao nhiêu kết quả đầu tiên (mặc định: 0)
-
-    **Response bao gồm:**
-    - `analyses`: Danh sách các kết quả phân tích
-    - `total`: Tổng số kết quả
-    """
+    __doc__ = USER_ANALYSES_DOC
     try:
         return contract_comparator.get_user_history(user_id, limit, skip)
     except Exception as e:
         logger.error(f"Error getting user analyses: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+get_user_analyses.__doc__ = USER_ANALYSES_DOC
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
 
 if __name__ == "__main__":
     import uvicorn
@@ -539,6 +358,5 @@ if __name__ == "__main__":
         port=8002,
         workers=1,
         log_level="info",
-        timeout_keep_alive=300  # 5 minutes keep-alive timeout
+        timeout_keep_alive=300
     )
-

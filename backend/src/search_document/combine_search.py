@@ -46,8 +46,6 @@ class CombinedSearch:
     - Elasticsearch BM25 (keyword search) 0GB VRAM
     - Reciprocal Rank Fusion (RRF) for combining results
     - Redis caching for performance
-
-    Đã bỏ E5 và BGE-reranker để tiết kiệm ~7GB VRAM
     """
 
     # RRF constant (higher = more weight to lower-ranked docs)

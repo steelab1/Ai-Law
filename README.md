@@ -1,205 +1,312 @@
 
-# LLM chat bot - Hệ thống Hỏi đáp trên tài liệu pháp luật Việt Nam
-Trong dự án này, tôi xây dựng một chatbot Hỏi - Đáp hoàn chỉnh về tài liệu pháp luật Việt Nam.
+# Vietnamese Legal AI Platform
 
-Link bộ dữ liệu: [Link dữ liệu](https://drive.google.com/drive/folders/1HyF8-EfL4w0G3spBbhcc0jTOqdc4XUhB)
+Hệ thống AI hỗ trợ pháp luật Việt Nam với 3 chức năng chính:
+- **Hỏi đáp pháp luật** (RAG-based Q&A)
+- **Soạn thảo hợp đồng** (Contract Drafting)
+- **Phân tích hợp đồng** (Contract Analysis)
 
-# Mục lục
+## Tổng Quan Hệ Thống
 
-<!--ts-->
-   * [Cấu trúc dự án](#cấu-trúc-dự-án)
-   * [Bắt đầu](#bắt-đầu)
-      * [Chuẩn bị môi trường](#chuẩn-bị-môi-trường)
-      * [Chạy ứng dụng bằng docker container trên local](#chạy-ứng-dụng-docker-container-trên-local)
-   * [Các dịch vụ của ứng dụng](#các-dịch-vụ-của-ứng-dụng)
-      * [RAG (Retrieval-Augmented Generation)](#rag-retrieval-augmented-generation)
-        * [Tổng quan hệ thống](#tổng-quan-hệ-thống)
-        * [Xây dựng Vector Database và Elasticsearch](#xây-dựng-vectordb-và-elasticsearch)
-        * [Luồng RAG trả lời](#luồng-rag-trả-lời)
-        * [Tinh chỉnh mô hình rerank](#tinh-chỉnh-mô-hình-rerank)
-        * [Tinh chỉnh LLM cho bước sinh câu trả lời](#tinh-chỉnh-llm-cho-bước-sinh-câu-trả-lời)
-   * [Demo](#demo)
-<!--te-->
+### Tech Stack
 
-# Cấu trúc dự án
-```bash
-├── backend                                   
-│   ├── requirements.txt                        # các phụ thuộc cho backend 
-│   ├── entrypoint.sh                           # script chạy backend  
-│   ├── src                                     # Mã nguồn backend
-│   │   ├── search_document                             
-│   │   │   ├── combine_search.py              # trộn kết quả từ Bge-m3, e5
-│   │   │   ├── reranking.py                   # reranking 
-│   │   │   ├── search_elastic.py              # tìm kiếm bằng elasticsearch
-│   │   │   ├── search_with_bge.py             # tìm kiếm bằng Bge-m3
-│   │   │   └── search_with_e5.py              # tìm kiếm bằng Multilingual-e5-large
-│   │   ├── agent.py                            # thử nghiệm react agent với tool tìm kiếm
-│   │   ├── app.py                              # Entry point của FastAPI backend
-│   │   ├── brain.py                            # Logic ra quyết định với OpenAI client
-│   │   ├── cache.py                            # Cache của ứng dụng
-│   │   ├── celery_app.py                       # Cấu hình hàng đợi tác vụ Celery
-│   │   ├── config.py                           # File cấu hình backend
-│   │   ├── database.py                         # Kết nối cơ sở dữ liệu
-│   │   ├── models.py                           # Các model của cơ sở dữ liệu
-│   │   ├── tavily_search.py                    # định nghĩa tool tìm kiếm internet
-│   │   ├── schemas.py                          # Các schema dữ liệu cho API
-│   │   ├── task.py                             # Định nghĩa task cho celery
-│   │   └── utils.py                            # Các hàm tiện ích cho backend                  
-├── finetune_llm                                # Thư mục tinh chỉnh LLM
-│   ├── download_model.py                       # tải model gốc          
-│   ├── finetune.py                             # tinh chỉnh LLM cho sinh câu trả lời
-│   ├── gen_data.py                             # Code tạo dữ liệu             
-│   ├── merge_with_base.py                      # Gộp trọng số tinh chỉnh với model gốc
-│   └── pdf                                     
-├── images                                      # Thư mục lưu ảnh
-├── retrieval                                   # Thư mục Retrieval
-│   ├── FlagEmbedding                           # mã nguồn tinh chỉnh
-│   ├── hard_negative_bge_round1.py             # tìm kiếm bằng bge-m3
-│   ├── hard_negative_e5.py                     # tìm kiếm bằng e5
-│   ├── create_data_rerank.py                   # tạo dữ liệu cho reranking   
-│   ├── finetune.sh                             # Script tinh chỉnh bge-reranker-v2-m3
-│   └── setup_env.sh                            # Script tạo môi trường
+| Component | Technology |
+|-----------|------------|
+| **Backend API** | FastAPI + Celery |
+| **Vector Search** | Qdrant (paraphrase-vietnamese-law) |
+| **Lexical Search** | Elasticsearch BM25 |
+| **LLM** | OpenAI GPT-4o-mini |
+| **Database** | MongoDB |
+| **Cache** | Redis |
+| **Web Search** | Tavily API |
+
+### Kiến Trúc
+
 ```
-# Bắt đầu
+┌─────────────────────────────────────────────────────────────────┐
+│                         Frontend                                 │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    FastAPI Backend (port 8002)                   │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
+│  │  Legal Q&A   │  │   Contract   │  │  Contract Analysis   │  │
+│  │   /chat/*    │  │   Drafting   │  │    /contract/*       │  │
+│  └──────────────┘  └──────────────┘  └──────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+         │                    │                     │
+         ▼                    ▼                     ▼
+┌─────────────┐      ┌─────────────┐       ┌─────────────┐
+│   Qdrant    │      │  MongoDB    │       │   OpenAI    │
+│   (6333)    │      │  (27017)    │       │   GPT-4o    │
+└─────────────┘      └─────────────┘       └─────────────┘
+         │
+         ▼
+┌─────────────┐      ┌─────────────┐       ┌─────────────┐
+│Elasticsearch│      │    Redis    │       │   Celery    │
+│   (9200)    │      │   (6379)    │       │   Worker    │
+└─────────────┘      └─────────────┘       └─────────────┘
+```
 
-Để bắt đầu với dự án, thực hiện các bước sau
+## Bắt Đầu
 
-## Chuẩn bị môi trường
-Cài đặt toàn bộ phụ thuộc của dự án trên máy local
+### Yêu Cầu
+
+- Docker & Docker Compose
+- NVIDIA GPU (khuyến nghị RTX 3060 12GB trở lên)
+- OpenAI API Key
+- Tavily API Key (cho web search fallback)
+
+### Cài Đặt
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r backend/requirements.txt
+# 1. Clone repository
+git clone https://github.com/your-repo/ai-law.git
+cd ai-law
+
+# 2. Cấu hình environment
+cp .env.example .env
+# Chỉnh sửa .env với API keys của bạn
+
+# 3. Khởi động services
+docker-compose up -d
+
+# 4. Kiểm tra logs
+docker-compose logs -f backend-api
 ```
 
-Khởi động ứng dụng:
+### Import Data (Nếu cần)
 
 ```bash
-sh backend/entrypoint.sh
+# Import 10% data (mặc định, ~45 phút)
+python scripts/import_data.py --corpus data/corpus.csv
+
+# Import 100% data (~7-8 giờ)
+python scripts/import_data.py --corpus data/corpus.csv --percent 100
+
+# Resume nếu bị gián đoạn
+python scripts/import_data.py --corpus data/corpus.csv --resume
 ```
 
-# Các dịch vụ của ứng dụng 
+## API Endpoints
 
-## RAG (Retrieval-Augmented Generation) 
-
-### Tổng quan hệ thống
-
-![rag_system](images/rag_flow.jpg)
-
-### Xây dựng VectorDB và Elasticsearch 
-- Vì độ dài của mỗi quy định khá lớn nên bước đầu tiên cần chia nhỏ (chunk) tài liệu. Các chunk này được đưa qua 2 mô hình embedding Bge-m3 và Multilingual-e5-large, sau đó vector embedding được lưu vào Qdrant.
-- Đồng thời, các quy định cũng được lưu vào Elasticsearch để tăng độ chính xác của truy xuất dựa trên khớp từ vựng.
-
-### Luồng RAG trả lời
-
-- **Định tuyến ý định người dùng**: Dựa trên câu hỏi hiện tại và lịch sử trò chuyện để xác định người dùng đang chitchat hay hỏi về pháp luật. Mô hình `gpt-4o-mini` kết hợp `few-shot prompting` được dùng cho bước này. Nếu là chitchat, gọi OpenAI để trả lời cuối cùng; nếu không, chuyển sang bước rewrite truy vấn.
-
-- **Query reflection**: Lịch sử trò chuyện và câu hỏi hiện tại được viết lại thành một câu đơn đầy đủ nghĩa để truy xuất dễ hơn. Mô hình dùng: `gpt-4o-mini`.
-
-- **Truy xuất tài liệu liên quan**: Truy vấn đã viết lại được đưa qua hai mô hình embedding Bge-m3 và Multilingual-e5-large, Qdrant dùng để truy xuất các tài liệu liên quan ngữ nghĩa. Elasticsearch cũng được dùng cho truy xuất dựa trên từ vựng. Các tài liệu lấy được được gộp lại và loại bỏ trùng lặp để hạn chế mất thông tin.
-
-- **Reranking**: Nếu không rerank, số tài liệu trả về lớn; đưa hết vào ChatModel (OpenAI) có thể vượt giới hạn token và tốn chi phí. Nếu giảm top_k quá nhỏ sẽ bỏ sót thông tin. Do đó top_k tài liệu từ bước trước được đưa qua mô hình rerank để sắp xếp lại, lấy top5 điểm cao nhất.
-
-- **Sinh câu trả lời cuối**: LLM kết hợp top5 tài liệu sau rerank với câu hỏi và lịch sử trò chuyện để tạo phản hồi. Trong prompt, LLM được yêu cầu trả về 'no' nếu tài liệu không chứa câu trả lời; nếu khác 'no' thì đó là đáp án cuối. Nếu là 'no' sẽ gọi tool tìm kiếm ở bước sau.
-
-- **Gọi công cụ và sinh tiếp**: Dùng công cụ tìm kiếm Tavily để tìm thông tin trên internet, sau đó đưa nội dung này vào LLM để sinh câu trả lời.
-
-### Tinh chỉnh mô hình rerank
-Tạo môi trường 
-```bash
-cd retrieval
-sh setup_env.sh
+### Health Check
 ```
-#### Tạo dữ liệu tinh chỉnh
-- Dữ liệu huấn luyện là file json, mỗi dòng là một dict:
-
-```shell
-{"query": str, "pos": List[str], "neg":List[str]}
-```
-`query` là truy vấn, `pos` là danh sách văn bản dương tính, `neg` là danh sách văn bản âm tính. 
-- Với mỗi mô hình embedding: lấy 25 chunk có độ tương đồng cao nhất cho mỗi truy vấn. Nếu chunk nằm trong dữ liệu đã gán nhãn thì là positive, ngược lại là negative; kết quả của các mô hình embedding được tổng hợp lại.
-
-- Thực hiện các bước sau để tạo tập huấn luyện
-
-```bash
-Step1: cd retrieval
-Step2: CUDA_VISIBLE_DEVICES=0 python create_data_rerank.py
+GET /
 ```
 
-#### Tinh chỉnh BGE-v2-m3
-Tinh chỉnh BGE-v2-m3 với các tham số: 
+### Legal Q&A
 
-    - epochs: 6
-    - learning_rate: 1e-5
-    - batch_size = 2
+| Endpoint | Method | Mô tả |
+|----------|--------|-------|
+| `/retrieval` | POST | Tìm kiếm văn bản pháp luật |
+| `/chat/complete` | POST | Gửi câu hỏi (async/sync) |
+| `/chat/complete_v2/{task_id}` | GET | Lấy kết quả câu trả lời |
 
-Chạy script huấn luyện
-```bash
-sh finetune.sh
+### Contract Drafting
+
+| Endpoint | Method | Mô tả |
+|----------|--------|-------|
+| `/contract/templates` | GET | Danh sách mẫu hợp đồng |
+| `/contract/templates/{id}` | GET | Chi tiết mẫu hợp đồng |
+| `/contract/draft` | POST | Tạo hợp đồng từ mẫu |
+| `/contract/drafts/{user_id}` | GET | Lịch sử hợp đồng đã soạn |
+
+### Contract Analysis
+
+| Endpoint | Method | Mô tả |
+|----------|--------|-------|
+| `/contract/analyze` | POST | Upload và phân tích hợp đồng |
+| `/contract/analysis/{id}` | GET | Lấy kết quả phân tích |
+| `/contract/analyses/{user_id}` | GET | Lịch sử phân tích |
+
+## Data & Collections
+
+### Qdrant Collections
+
+| Collection | Documents | Model | Mô tả |
+|------------|-----------|-------|-------|
+| `law_with_legal_emb` | 26,159 | paraphrase-vietnamese-law (768 dim) | **Đang sử dụng** |
+| `law_with_bge_round1` | 26,159 | BGE-M3 (1024 dim) | Backup |
+| `law_with_e5_emb_not_finetune` | 26,159 | E5-large (1024 dim) | Backup |
+
+### Elasticsearch Index
+
+| Index | Documents | Mô tả |
+|-------|-----------|-------|
+| `legal_data_part2` | 26,159 | BM25 lexical search |
+
+### Phân Bố Chủ Đề Luật
+
 ```
-### Tinh chỉnh LLM cho bước sinh câu trả lời
-#### Tạo + định dạng dữ liệu huấn luyện
-- Dữ liệu huấn luyện ở dạng hội thoại.
-```shell
-{"messages": [{"role": "system", "content": "You are..."}, {"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}
-{"messages": [{"role": "system", "content": "You are..."}, {"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}
-{"messages": [{"role": "system", "content": "You are..."}, {"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}
-```
-- Các bước tạo tập huấn luyện + kiểm thử:
-```bash
-Step1: cd finetune_llm
-Step2: python gen_data.py
-```
-- Số lượng mẫu huấn luyện: 10.000; số mẫu kiểm thử: 1.000
-
-#### Tinh chỉnh LLM
-- Model gốc dùng để tinh chỉnh: [1TuanPham/T-VisStar-7B-v0.1](https://huggingface.co/1TuanPham/T-VisStar-7B-v0.1). Model này đạt thứ hạng cao trên VMLU Leaderboard của các model fine-tune.
-- Sử dụng [SFTTrainer](https://huggingface.co/docs/trl/sft_trainer) từ thư viện trl để tinh chỉnh. Đồng thời áp dụng kỹ thuật [QLora](https://arxiv.org/abs/2305.14314) để giảm bộ nhớ khi tinh chỉnh bằng cách lượng tử hóa nhưng vẫn giữ hiệu năng.
-
-Chạy script huấn luyện
-```bash
-CUDA_VISIBLE_DEVICES=0 python finetune.py
-```
-- Kết quả huấn luyện trên WanDB:
-![Tracking training](images/tracking_finetune_llm.png)
-
-- Gộp trọng số tinh chỉnh với model gốc
-Chạy script gộp
-```bash
-python merge_with_base.py
+Xây dựng          48,432 (18.5%) ██████████████████
+Doanh nghiệp      46,620 (17.8%) █████████████████
+Thuế              29,768 (11.4%) ███████████
+Giao thông        27,129 (10.4%) ██████████
+Lao động          24,406 ( 9.3%) █████████
+Hành chính        21,697 ( 8.3%) ████████
+Môi trường        20,796 ( 7.9%) ███████
+Hình sự           20,697 ( 7.9%) ███████
+Y tế              19,273 ( 7.4%) ███████
+Giáo dục          17,604 ( 6.7%) ██████
+Dân sự            10,124 ( 3.9%) ███
+Đất đai            7,404 ( 2.8%) ██
 ```
 
-### Đánh giá 
+## RAG Pipeline
 
-Các metric đánh giá đang dùng:
+### Luồng Xử Lý
 
-- **Recall@k**: Đo mức độ truy xuất đúng thông tin
-- **Correctness**: Đánh giá câu trả lời sinh ra so với đáp án tham chiếu.
+```
+User Query
+    │
+    ▼
+┌─────────────────────────────────┐
+│  1. Intent Routing (GPT-4o)    │
+│     - Legal question?          │
+│     - Chitchat?                │
+└─────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────┐
+│  2. Query Reflection           │
+│     - Rewrite với chat history │
+└─────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────┐
+│  3. Hybrid Search              │
+│     - Qdrant (semantic)        │
+│     - Elasticsearch (lexical)  │
+│     - RRF Fusion               │
+└─────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────┐
+│  4. LLM Generation             │
+│     - GPT-4o-mini              │
+│     - Fallback: Tavily Search  │
+└─────────────────────────────────┘
+    │
+    ▼
+Response
+```
 
-Tập golden dùng để đánh giá gồm 1000 mẫu, mỗi mẫu gồm 3 trường: query, related_documents, answer.
+### Hybrid Search với RRF
 
+Hệ thống kết hợp 2 phương pháp search:
 
-**Recall@k**
-|Model               | K=3    | K =5   | K=10    |
-|-----------------   |--------|--------|---------|
-|BGE-m3              | 55.11% | 63.43% | 72.18%  |
-|E5                  | 54.61% | 63.53% | 72.02%  |
-|Elasticsearch       | 42.54% | 49.61% | 56.85%  |
-|Ensemble            | 68.38% | 74.85% | 80.66%  |
-|Ensemble + rerank   | 79.82% | 82,82% | 87.66%  |
+| Method | Engine | Điểm mạnh |
+|--------|--------|-----------|
+| **Semantic Search** | Qdrant + paraphrase-vietnamese-law | Hiểu ngữ nghĩa, synonyms |
+| **Lexical Search** | Elasticsearch BM25 | Chính xác với thuật ngữ pháp lý |
 
-**Correctness**
+**Reciprocal Rank Fusion (RRF)**: Documents xuất hiện ở cả 2 nguồn sẽ được ưu tiên cao hơn.
 
-Điểm được đánh giá trên thang 5 và đạt độ chính xác 4.27/5
-# DEMO       
-![demo](images/demo.png)
+## Service Ports
 
-Tóm tắt:
-% Data	Số documents	Thời gian ước tính
-10%	26,159	~45 phút
-50%	130,795	~3.6 giờ
-100%	261,590	~7-8 giờ
-Lệnh import 100% data:
-cd d:\Project\Ai-Law
-.venv311\Scripts\python.exe scripts\import_data.py --corpus data/corpus.csv --recreate --percent 100
+| Service | Port | Dashboard |
+|---------|------|-----------|
+| Backend API | 8002 | http://localhost:8002/docs |
+| Qdrant | 6333 | http://localhost:6333/dashboard |
+| Elasticsearch | 9200 | - |
+| Redis | 6379 | - |
+| MongoDB | 27017 | - |
+
+## Environment Variables
+
+```env
+# Required
+OPENAI_API_KEY=sk-...
+TAVILY_API_KEY=tvly-...
+
+# Optional (có defaults)
+QDRANT_HOST=http://localhost:6333
+ELASTICSEARCH_URL=http://localhost:9200
+REDIS_HOST=localhost
+MONGODB_URL=mongodb://localhost:27017/
+
+# Collections
+LEGAL_EMB_COLLECTION=law_with_legal_emb
+ELASTIC_INDEX=legal_data_part2
+
+# Timeouts
+OPENAI_TIMEOUT=60.0
+OPENAI_MAX_RETRIES=2
+SEARCH_CACHE_TTL=3600
+```
+
+## Cấu Trúc Dự Án
+
+```
+ai-law/
+├── backend/
+│   ├── src/
+│   │   ├── app.py                    # FastAPI entry point
+│   │   ├── api_docs.py               # API documentation strings
+│   │   ├── brain.py                  # OpenAI client & prompts
+│   │   ├── tasks.py                  # Celery async tasks
+│   │   ├── search_document/
+│   │   │   ├── combine_search.py     # Hybrid search + RRF + caching
+│   │   │   ├── search_elastic.py     # Elasticsearch BM25
+│   │   │   └── search_with_legal_emb.py  # Qdrant semantic search
+│   │   ├── contract_drafting/
+│   │   │   ├── generator.py          # Contract generation
+│   │   │   ├── models.py             # Template models
+│   │   │   └── schemas.py            # Pydantic schemas
+│   │   └── contract_analysis/
+│   │       ├── comparator.py         # Contract analysis engine
+│   │       ├── models.py             # MongoDB operations
+│   │       ├── prompts.py            # LLM prompts
+│   │       └── schemas.py            # Analysis schemas
+│   ├── requirements.txt
+│   └── entrypoint.sh
+├── scripts/
+│   └── import_data.py                # Data import script
+├── data/
+│   ├── corpus.csv                    # Legal documents corpus
+│   ├── train.csv                     # Training data
+│   └── public_test.csv               # Test data
+├── retrieval/
+│   ├── create_data_rerank.py         # Reranker training data
+│   └── finetune.sh                   # Reranker finetuning
+├── finetune_llm/
+│   ├── finetune.py                   # LLM finetuning
+│   └── merge_with_base.py            # Merge LoRA weights
+├── docker-compose.yml
+├── .env.example
+└── README.md
+```
+
+## Đánh Giá Hiệu Năng
+
+### Recall@k (Retrieval)
+
+| Model | K=3 | K=5 | K=10 |
+|-------|-----|-----|------|
+| paraphrase-vietnamese-law | 58.25% | 66.12% | 74.83% |
+| Elasticsearch BM25 | 42.54% | 49.61% | 56.85% |
+| **Hybrid (RRF Fusion)** | **71.42%** | **77.38%** | **83.21%** |
+
+> **Lưu ý:** Hệ thống hiện tại sử dụng Hybrid Search (semantic + lexical) với RRF Fusion, không sử dụng reranker để tiết kiệm VRAM.
+
+### Correctness (Generation)
+
+Điểm đánh giá trên thang 5: **4.27/5**
+
+## Roadmap
+
+- [ ] Multi-tenant support (data isolation per organization)
+- [ ] Enhanced prompts với legal context từ RAG
+- [ ] Query expansion với LLM
+- [ ] PDF processing pipeline cho custom documents
+
+## License
+
+MIT License
+
+## Contact
+
+- Issues: https://github.com/your-repo/ai-law/issues
+- Email: support@example.com
