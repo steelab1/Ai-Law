@@ -123,7 +123,7 @@ services:
   backend-celery:
     build:
       context: ./backend
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.gpu
     container_name: ai-law-backend-celery
     command: celery -A tasks.celery_app worker --loglevel=info --concurrency=2
     environment:
