@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 # Read config from environment
 QDRANT_HOST = os.getenv("QDRANT_HOST", "http://localhost:6333")
-LEGAL_EMB_COLLECTION = os.getenv("LEGAL_EMB_COLLECTION", "law_with_legal_emb")
+LEGAL_EMB_COLLECTION = os.getenv("LEGAL_EMB_COLLECTION", "vietnamese_legal_docs")
 ELASTIC_INDEX = os.getenv("ELASTIC_INDEX", "legal_data_part2")
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
