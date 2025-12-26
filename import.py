@@ -1,13 +1,23 @@
+"""
+Import vietnamese-legal-corpus-20k-raw vào Qdrant
+Dataset: https://huggingface.co/datasets/52100303-TranPhuocSang/vietnamese-legal-corpus-20k-raw
+"""
 import torch
+import re
 from datasets import load_dataset
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient, models
+from tqdm import tqdm
 
 # ===== CONFIG =====
 MODEL_NAME = "minhquan6203/paraphrase-vietnamese-law"
 COLLECTION_NAME = "vietnamese_legal_docs"
 VECTOR_SIZE = 768
 BATCH_SIZE = 32
+
+# Chunking config
+CHUNK_SIZE = 512  # Số ký tự mỗi chunk
+CHUNK_OVERLAP = 100  # Overlap giữa các chunks
 
 # ===== BƯỚC 0: Kiểm tra GPU =====
 print(f"GPU Available: {torch.cuda.is_available()}")
@@ -20,31 +30,61 @@ else:
 print(f"Using device: {device}")
 
 # ===== BƯỚC 1: Tải dataset =====
-print("\nLoading dataset...")
-dataset = load_dataset("YuITC/Vietnamese-legal-documents")
+print("\nLoading dataset: vietnamese-legal-corpus-20k-raw...")
+print("(This may take a few minutes for 2.6GB download)")
+dataset = load_dataset("52100303-TranPhuocSang/vietnamese-legal-corpus-20k-raw")
 print(f"Dataset loaded: {len(dataset['train'])} documents")
 
-# ===== BƯỚC 2: Load mô hình paraphrase-vietnamese-law =====
+# ===== BƯỚC 2: Load mô hình =====
 print(f"\nLoading model: {MODEL_NAME}...")
 model = SentenceTransformer(MODEL_NAME, device=device)
 print("Model loaded!")
 
-# ===== BƯỚC 3: Hàm tạo embeddings =====
-def create_embeddings(texts, batch_size=BATCH_SIZE):
-    """Tạo embeddings với SentenceTransformer"""
-    embeddings = model.encode(
-        texts,
-        batch_size=batch_size,
-        normalize_embeddings=True,  # Chuẩn hóa cho cosine similarity
-        show_progress_bar=False
-    )
-    return embeddings
+# ===== BƯỚC 3: Hàm chunking =====
+def clean_text(text):
+    """Làm sạch text"""
+    if not text:
+        return ""
+    # Loại bỏ HTML tags nếu còn
+    text = re.sub(r'<[^>]+>', '', text)
+    # Loại bỏ whitespace thừa
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
 
-# ===== BƯỚC 4: Tạo Qdrant collection =====
+def chunk_text(text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
+    """Chia text thành các chunks với overlap"""
+    if not text or len(text) < 100:
+        return [text] if text else []
+
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunk = text[start:end]
+
+        # Cố gắng cắt ở cuối câu
+        if end < len(text):
+            last_period = chunk.rfind('.')
+            last_newline = chunk.rfind('\n')
+            cut_point = max(last_period, last_newline)
+            if cut_point > chunk_size // 2:
+                chunk = chunk[:cut_point + 1]
+                end = start + cut_point + 1
+
+        if chunk.strip():
+            chunks.append(chunk.strip())
+
+        start = end - overlap
+        if start >= len(text):
+            break
+
+    return chunks
+
+# ===== BƯỚC 4: Kết nối Qdrant =====
 print("\nConnecting to Qdrant Docker...")
 client = QdrantClient(host="localhost", port=6333)
 
-# Xóa collection cũ nếu tồn tại, rồi tạo mới
+# Xóa collection cũ nếu tồn tại
 if client.collection_exists(COLLECTION_NAME):
     print(f"Deleting existing collection: {COLLECTION_NAME}...")
     client.delete_collection(COLLECTION_NAME)
@@ -58,44 +98,92 @@ client.create_collection(
 )
 print(f"Collection '{COLLECTION_NAME}' created!")
 
-# ===== BƯỚC 5: Upload dữ liệu =====
-print("\nUploading data to Qdrant...")
+# ===== BƯỚC 5: Xử lý và upload dữ liệu =====
+print("\nProcessing and uploading data...")
+print("Step 1: Chunking all documents...")
+
+all_chunks = []
+for idx, doc in enumerate(tqdm(dataset['train'], desc="Chunking")):
+    # Lấy full_text (ưu tiên) hoặc title
+    full_text = clean_text(doc.get('full_text', ''))
+    title = clean_text(doc.get('title', ''))
+
+    # Lấy metadata
+    metadata = {
+        'title': title,
+        'official_number': doc.get('official_number', ''),
+        'document_type': doc.get('document_type', ''),
+        'document_field': doc.get('document_field', ''),
+        'issued_date': doc.get('issued_date', ''),
+        'effective_date': doc.get('effective_date', ''),
+        'place_issue': doc.get('place_issue', ''),
+        'signer': doc.get('signer', ''),
+        'url': doc.get('url', ''),
+        'source_id': doc.get('source_id', idx),
+    }
+
+    # Chunk full_text
+    if full_text:
+        chunks = chunk_text(full_text)
+        for chunk_idx, chunk in enumerate(chunks):
+            all_chunks.append({
+                'text': chunk,
+                'chunk_idx': chunk_idx,
+                'total_chunks': len(chunks),
+                **metadata
+            })
+    elif title:
+        # Nếu không có full_text, dùng title
+        all_chunks.append({
+            'text': title,
+            'chunk_idx': 0,
+            'total_chunks': 1,
+            **metadata
+        })
+
+print(f"Total chunks created: {len(all_chunks)}")
+
+# ===== BƯỚC 6: Embedding và upload =====
+print("\nStep 2: Embedding and uploading to Qdrant...")
 total_uploaded = 0
 
-for batch_idx, batch in enumerate(dataset['train'].iter(batch_size=BATCH_SIZE)):
-    # Tạo embeddings từ question
-    question_vectors = create_embeddings(batch['question'])
+for i in tqdm(range(0, len(all_chunks), BATCH_SIZE), desc="Uploading"):
+    batch = all_chunks[i:i+BATCH_SIZE]
 
-    # Chuẩn bị points
+    # Tạo embeddings
+    texts = [chunk['text'] for chunk in batch]
+    embeddings = model.encode(
+        texts,
+        batch_size=BATCH_SIZE,
+        normalize_embeddings=True,
+        show_progress_bar=False
+    )
+
+    # Tạo points
     points = []
-    for i, qid in enumerate(batch['qid']):
-        # Lấy context
-        context = batch['context_list'][i][0] if batch['context_list'][i] else ""
-
+    for j, (chunk, embedding) in enumerate(zip(batch, embeddings)):
         points.append(
             models.PointStruct(
-                id=int(qid),
-                vector=question_vectors[i].tolist(),
-                payload={
-                    "text": batch['question'][i],  # Field chính cho search
-                    "question": batch['question'][i],
-                    "cid": batch['cid'][i],
-                    "context": context
-                }
+                id=i + j,
+                vector=embedding.tolist(),
+                payload=chunk
             )
         )
 
-    # Upsert vào Qdrant
+    # Upload
     client.upsert(COLLECTION_NAME, points)
     total_uploaded += len(points)
 
-    # Log progress và dọn dẹp memory
-    if (batch_idx + 1) % 10 == 0:
-        print(f"Processed {total_uploaded} documents...")
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+    # Dọn GPU memory
+    if torch.cuda.is_available() and (i // BATCH_SIZE) % 50 == 0:
+        torch.cuda.empty_cache()
 
 # ===== DONE =====
 final_count = client.count(COLLECTION_NAME).count
-print(f"\nDone! Collection '{COLLECTION_NAME}': {final_count} documents")
-print(f"Model used: {MODEL_NAME}")
+print(f"\n{'='*50}")
+print(f"DONE!")
+print(f"Collection: {COLLECTION_NAME}")
+print(f"Total chunks indexed: {final_count}")
+print(f"Model: {MODEL_NAME}")
+print(f"Chunk size: {CHUNK_SIZE} chars, Overlap: {CHUNK_OVERLAP} chars")
+print(f"{'='*50}")

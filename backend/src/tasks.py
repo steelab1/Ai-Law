@@ -7,8 +7,7 @@ from celery import shared_task
 
 from utils import setup_logging
 from database import get_celery_app
-from brain import detect_route, openai_chat_complete, detect_user_intent, gen_doc_prompt, \
-    get_legal_agent_anwer
+from brain import detect_route, openai_chat_complete, detect_user_intent, gen_doc_prompt
 from agent import react_agent_handle
 from models import update_chat_conversation, get_conversation_messages
 import requests
@@ -63,22 +62,26 @@ def bot_answer_message(history, message):
     # Use history as openai messages
     session_history = copy(history)
 
+    # Nếu không có documents, không gọi RAG (tránh GPT bịa)
+    if not top_docs:
+        logger.warning("No documents retrieved, skipping RAG")
+        return "Xin lỗi, tôi không tìm thấy thông tin pháp luật liên quan đến câu hỏi của bạn trong cơ sở dữ liệu."
+
     openai_messages = [
             {
                 "role": "system",
-                "content": """Bạn là một trợ lý pháp luật chuyên nghiệp, hãy trả lời câu hỏi của người dùng dựa trên lịch sử chat và các tài liệu pháp luật được cung cấp.
+                "content": """Bạn là một trợ lý pháp luật chuyên nghiệp. Trả lời câu hỏi của người dùng CHỈ DỰA TRÊN các tài liệu pháp luật được cung cấp bên dưới.
 
-YÊU CẦU TRẢ LỜI:
-- Trả lời chi tiết, đầy đủ với các điều khoản cụ thể từ văn bản pháp luật
-- Trích dẫn rõ nguồn: số điều, khoản, tên văn bản pháp luật (Nghị định, Thông tư, Luật...)
+YÊU CẦU BẮT BUỘC:
+- CHỈ sử dụng thông tin có trong tài liệu được cung cấp
+- Trích dẫn rõ nguồn: số điều, khoản, tên văn bản pháp luật
+- Nếu tài liệu không chứa thông tin liên quan đến câu hỏi, trả lời CHÍNH XÁC: [KHÔNG TÌM THẤY]
+- TUYỆT ĐỐI KHÔNG bịa đặt, suy diễn, hoặc dùng kiến thức bên ngoài tài liệu
+
+ĐỊNH DẠNG TRẢ LỜI:
+- Trả lời chi tiết với các điều khoản cụ thể
 - Nếu có mức phạt, nêu rõ mức tối thiểu và tối đa
-- Giải thích ngắn gọn ý nghĩa thực tiễn nếu cần thiết
-- Cấu trúc câu trả lời rõ ràng, dễ đọc
-
-LƯU Ý:
-- Chỉ trả lời dựa trên thông tin trong tài liệu được cung cấp
-- Nếu không tìm thấy thông tin liên quan trong tài liệu, trả về đúng từ: "no"
-- Không bịa đặt hoặc suy diễn thông tin ngoài tài liệu"""
+- Cấu trúc rõ ràng, dễ đọc"""
             },
             *session_history
         ]
@@ -86,19 +89,18 @@ LƯU Ý:
     # Update documents to prompt
     rag_openai_messages = openai_messages +  [
             {"role": "user", "content": gen_doc_prompt(top_docs)},
-            {"role": "user", "content": message},
+            {"role": "user", "content": f"Câu hỏi: {message}\n\nHãy trả lời DỰA TRÊN tài liệu ở trên. Nếu không tìm thấy thông tin, trả lời [KHÔNG TÌM THẤY]."},
         ]
 
     assistant_answer = openai_chat_complete(rag_openai_messages)
-    if assistant_answer != "no":
-        logger.info(f"Only call RAG")
-        return assistant_answer
-    else:
-        messages = history + [
-            {"role": "user", "content": message},
-        ]
-        agent_answer = get_legal_agent_anwer(messages)
-        return agent_answer
+
+    # Check nếu không tìm thấy thông tin
+    if "[KHÔNG TÌM THẤY]" in assistant_answer.upper() or assistant_answer.strip().lower() == "no":
+        logger.info("RAG không tìm thấy thông tin, trả về thông báo")
+        return "Xin lỗi, tôi không tìm thấy thông tin pháp luật liên quan đến câu hỏi của bạn trong cơ sở dữ liệu."
+
+    logger.info("RAG trả lời thành công")
+    return assistant_answer
 
 
 @shared_task()

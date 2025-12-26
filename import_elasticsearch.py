@@ -1,7 +1,8 @@
 """
-Import dataset vào Elasticsearch cho lexical search (BM25)
-Chạy sau khi đã có Elasticsearch container running
+Import vietnamese-legal-corpus-20k-raw vào Elasticsearch
+Dataset: https://huggingface.co/datasets/52100303-TranPhuocSang/vietnamese-legal-corpus-20k-raw
 """
+import re
 from datasets import load_dataset
 from elasticsearch import Elasticsearch, helpers
 from tqdm import tqdm
@@ -10,6 +11,47 @@ from tqdm import tqdm
 ELASTICSEARCH_URL = "http://localhost:9200"
 INDEX_NAME = "legal_data_part2"
 BATCH_SIZE = 500
+
+# Chunking config (same as import.py)
+CHUNK_SIZE = 512
+CHUNK_OVERLAP = 100
+
+# ===== Hàm chunking =====
+def clean_text(text):
+    """Làm sạch text"""
+    if not text:
+        return ""
+    text = re.sub(r'<[^>]+>', '', text)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
+
+def chunk_text(text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
+    """Chia text thành các chunks với overlap"""
+    if not text or len(text) < 100:
+        return [text] if text else []
+
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunk = text[start:end]
+
+        if end < len(text):
+            last_period = chunk.rfind('.')
+            last_newline = chunk.rfind('\n')
+            cut_point = max(last_period, last_newline)
+            if cut_point > chunk_size // 2:
+                chunk = chunk[:cut_point + 1]
+                end = start + cut_point + 1
+
+        if chunk.strip():
+            chunks.append(chunk.strip())
+
+        start = end - overlap
+        if start >= len(text):
+            break
+
+    return chunks
 
 # ===== Kết nối Elasticsearch =====
 print(f"Connecting to Elasticsearch at {ELASTICSEARCH_URL}...")
@@ -27,7 +69,6 @@ if es.indices.exists(index=INDEX_NAME):
     print(f"Deleting existing index: {INDEX_NAME}...")
     es.indices.delete(index=INDEX_NAME)
 
-# Tạo index với mapping tối ưu cho tiếng Việt
 print(f"Creating index: {INDEX_NAME}...")
 es.indices.create(
     index=INDEX_NAME,
@@ -46,21 +87,19 @@ es.indices.create(
         },
         "mappings": {
             "properties": {
-                "text": {
-                    "type": "text",
-                    "analyzer": "vietnamese_analyzer"
-                },
-                "question": {
-                    "type": "text",
-                    "analyzer": "vietnamese_analyzer"
-                },
-                "context": {
-                    "type": "text",
-                    "analyzer": "vietnamese_analyzer"
-                },
-                "cid": {
-                    "type": "keyword"
-                }
+                "text": {"type": "text", "analyzer": "vietnamese_analyzer"},
+                "title": {"type": "text", "analyzer": "vietnamese_analyzer"},
+                "official_number": {"type": "keyword"},
+                "document_type": {"type": "keyword"},
+                "document_field": {"type": "keyword"},
+                "issued_date": {"type": "keyword"},
+                "effective_date": {"type": "keyword"},
+                "place_issue": {"type": "keyword"},
+                "signer": {"type": "text"},
+                "url": {"type": "keyword"},
+                "source_id": {"type": "integer"},
+                "chunk_idx": {"type": "integer"},
+                "total_chunks": {"type": "integer"}
             }
         }
     }
@@ -68,31 +107,60 @@ es.indices.create(
 print(f"Index '{INDEX_NAME}' created!")
 
 # ===== Load dataset =====
-print("\nLoading dataset...")
-dataset = load_dataset("YuITC/Vietnamese-legal-documents")
+print("\nLoading dataset: vietnamese-legal-corpus-20k-raw...")
+dataset = load_dataset("52100303-TranPhuocSang/vietnamese-legal-corpus-20k-raw")
 print(f"Dataset loaded: {len(dataset['train'])} documents")
 
-# ===== Import data =====
-print("\nImporting data to Elasticsearch...")
+# ===== Chunking =====
+print("\nChunking documents...")
+all_chunks = []
+for idx, doc in enumerate(tqdm(dataset['train'], desc="Chunking")):
+    full_text = clean_text(doc.get('full_text', ''))
+    title = clean_text(doc.get('title', ''))
+
+    metadata = {
+        'title': title,
+        'official_number': doc.get('official_number', ''),
+        'document_type': doc.get('document_type', ''),
+        'document_field': doc.get('document_field', ''),
+        'issued_date': doc.get('issued_date', ''),
+        'effective_date': doc.get('effective_date', ''),
+        'place_issue': doc.get('place_issue', ''),
+        'signer': doc.get('signer', ''),
+        'url': doc.get('url', ''),
+        'source_id': doc.get('source_id', idx),
+    }
+
+    if full_text:
+        chunks = chunk_text(full_text)
+        for chunk_idx, chunk in enumerate(chunks):
+            all_chunks.append({
+                'text': chunk,
+                'chunk_idx': chunk_idx,
+                'total_chunks': len(chunks),
+                **metadata
+            })
+    elif title:
+        all_chunks.append({
+            'text': title,
+            'chunk_idx': 0,
+            'total_chunks': 1,
+            **metadata
+        })
+
+print(f"Total chunks: {len(all_chunks)}")
+
+# ===== Import vào Elasticsearch =====
+print("\nImporting to Elasticsearch...")
 
 def generate_actions():
-    """Generator để bulk index"""
-    for idx, item in enumerate(dataset['train']):
-        # Lấy context
-        context = item['context_list'][0] if item['context_list'] else ""
-
+    for idx, chunk in enumerate(all_chunks):
         yield {
             "_index": INDEX_NAME,
-            "_id": item['qid'],
-            "_source": {
-                "text": item['question'],  # Field chính cho search
-                "question": item['question'],
-                "context": context,
-                "cid": item['cid']
-            }
+            "_id": idx,
+            "_source": chunk
         }
 
-# Bulk index với progress bar
 success, failed = 0, 0
 for ok, result in tqdm(
     helpers.streaming_bulk(
@@ -101,7 +169,7 @@ for ok, result in tqdm(
         chunk_size=BATCH_SIZE,
         raise_on_error=False
     ),
-    total=len(dataset['train']),
+    total=len(all_chunks),
     desc="Indexing"
 ):
     if ok:
@@ -109,12 +177,13 @@ for ok, result in tqdm(
     else:
         failed += 1
 
-# Refresh index
 es.indices.refresh(index=INDEX_NAME)
 
 # ===== Done =====
 doc_count = es.count(index=INDEX_NAME)['count']
-print(f"\nDone!")
-print(f"  Index: {INDEX_NAME}")
-print(f"  Documents indexed: {doc_count}")
-print(f"  Success: {success}, Failed: {failed}")
+print(f"\n{'='*50}")
+print(f"DONE!")
+print(f"Index: {INDEX_NAME}")
+print(f"Documents indexed: {doc_count}")
+print(f"Success: {success}, Failed: {failed}")
+print(f"{'='*50}")

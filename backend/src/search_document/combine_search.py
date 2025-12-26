@@ -20,7 +20,6 @@ REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 CACHE_TTL = int(os.getenv("SEARCH_CACHE_TTL", "3600"))  # 1 hour default
 
 # Khởi tạo legal embedding search (paraphrase-vietnamese-law)
-# Đã bỏ E5 và BGE-M3 để tiết kiệm VRAM (~7GB)
 logger.info("Using paraphrase-vietnamese-law for legal embedding search (optimized)")
 legal_search_instance = QdrantSearch_legal(
     host=QDRANT_HOST,
